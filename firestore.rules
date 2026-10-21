@@ -1,0 +1,106 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    // Active member: signed in AND custom claim status == "active".
+    // Claims are set by the server-side /api/auth/signup route on signup,
+    // and by the team-management routes on remove. Removed users still have
+    // a valid Firebase Auth user but their token's status flips to "removed",
+    // so they can no longer read or write any workspace data.
+    function isActive() {
+      return isAuthed() && request.auth.token.status == "active";
+    }
+
+    function isAdmin() {
+      return isActive() && request.auth.token.role == "admin";
+    }
+
+    // App config — singleton at /appConfig/main, holds the workspace's adminUid.
+    // Written only by the server (Admin SDK) on first signup. Active members
+    // need to read it to resolve their effective ownerId.
+    match /appConfig/{docId} {
+      allow read: if isActive();
+      allow write: if false;
+    }
+
+    // Invites — keyed by lowercased email. Only the admin manages these.
+    match /invites/{email} {
+      allow read, write: if isAdmin();
+    }
+
+    // User profile docs.
+    // - Self-read by the user (so AuthContext can load role/status/profile).
+    // - Admin-read for any user (so the Team section can list members).
+    // - Self-update only (display name, etc.). Role/status are server-only fields.
+    // - Create + delete are server-only via Admin SDK.
+    match /users/{userId} {
+      allow read: if isActive() && (request.auth.uid == userId || isAdmin());
+      allow update: if isActive() && request.auth.uid == userId;
+      allow create, delete: if false;
+    }
+
+    // Mail queue for the Firebase "Trigger Email" extension.
+    // Active users can enqueue mail; they can't read the queue.
+    match /mail/{mailId} {
+      allow create: if isActive();
+      allow read, update, delete: if false;
+    }
+
+    // Workspace data — every active member (admin OR collaborator) has full
+    // read+write access. The single-tenant model means there's exactly one
+    // workspace per deployment, owned by the admin's uid; all writes carry
+    // ownerId == adminUid (set client-side from AuthContext).
+
+    match /contacts/{contactId} {
+      allow read, write: if isActive();
+
+      match /notes/{noteId} {
+        allow read, write: if isActive();
+      }
+
+      match /activities/{activityId} {
+        allow read, write: if isActive();
+      }
+    }
+
+    match /deals/{dealId} {
+      allow read, write: if isActive();
+    }
+
+    match /events/{eventId} {
+      allow read, write: if isActive();
+    }
+
+    match /tasks/{taskId} {
+      allow read, write: if isActive();
+    }
+
+    match /forms/{formId} {
+      allow read, write: if isActive();
+
+      // Submissions are written by the public submit route via Admin SDK
+      // (rules don't apply); active members can read them.
+      match /submissions/{submissionId} {
+        allow read: if isActive();
+        allow write: if false;
+      }
+    }
+
+    // Usage counters — server writes via admin SDK (email + SMS sends).
+    // Admin can read any user's counters; users can read their own.
+    match /usage/{uid} {
+      allow read: if isActive() && (request.auth.uid == uid || isAdmin());
+      allow write: if false;
+    }
+
+    // Default: deny everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
